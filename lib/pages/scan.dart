@@ -1,107 +1,99 @@
-import 'package:flutter/material.dart';                 // Widgets e UI do Flutter
-import 'package:mobile_scanner/mobile_scanner.dart';    // Plugin do leitor de código de barras/QR
-import 'package:intl/intl.dart';                        // Formatação (moeda, datas, etc.)
+import 'package:flutter/material.dart';                 // Widgets/UI
+import 'package:mobile_scanner/mobile_scanner.dart';    // Leitor de código de barras
+import 'package:intl/intl.dart';                        // Formatação BRL
+import '../services/db.dart';                           // Nosso serviço de banco
 
-// Tela de leitura (scanner). Usamos StatefulWidget porque o estado muda
-// quando um código é lido (exibir resultado, pausar/retomar câmera).
+/// Tela de leitura (scanner) conectada ao Supabase.
+/// Mantém o mesmo comportamento do mock, mas consulta o DB de verdade.
 class Scan extends StatefulWidget {
   const Scan({super.key});
-
   @override
   State<Scan> createState() => _ScanState();
 }
 
 class _ScanState extends State<Scan> {
-  // Controlador do plugin de câmera/scan. Com ele podemos iniciar/parar
-  // a câmera e ajustar configurações se quisermos.
   final MobileScannerController _controller = MobileScannerController();
+  final DbService _db = DbService(); // serviço do Supabase
 
-  // Flag para sabermos se estamos "pausados" (após detectar um código).
-  // Quando pausado, não processamos novas leituras até o usuário pedir.
-  bool _paused = false;
+  bool _paused = false;      // para pausar novas leituras enquanto mostramos o resultado
+  String? _lastCode;         // último EAN lido
+  String? _priceText;        // texto exibido (preço formatado ou mensagem)
 
-  // Armazenam o último código lido e o texto do preço encontrado.
-  String? _lastCode;
-  String? _priceText;
-
-  // ==== DADOS MOCKADOS (apenas para protótipo) ====
-  // Mapa EAN -> preço. Em produção, substitua por consulta ao seu banco (Supabase).
-  final Map<String, double> _mockPrices = {
-    '7891000055123': 9.99,
-    '7894900011517': 4.59,
-    '7896004000018': 12.90,
-  };
-
-  // Formata um double como moeda BRL (ex.: R$ 9,99).
-  String _formatPrice(double value) {
+  // Formata double como moeda BRL (ex.: R$ 9,99).
+  String _formatPrice(num value) {
     final f = NumberFormat.simpleCurrency(locale: 'pt_BR');
     return f.format(value);
   }
 
-  // Busca o preço a partir do EAN usando o mock.
-  // Se não existir no mapa, retorna "Produto não encontrado".
-  String _lookupPrice(String ean) {
-    final price = _mockPrices[ean];
-    if (price == null) return 'Produto não encontrado';
-    return _formatPrice(price);
+  /// Consulta o banco e retorna o texto a ser exibido no painel inferior.
+  /// - Se achar o produto: retorna preço formatado
+  /// - Se não achar: "Produto não encontrado"
+  /// - Se der erro: mensagem amigável
+  Future<String> _lookupPriceFromDb(String ean) async {
+    try {
+      final row = await _db.getProdutoByBarcode(ean);
+      if (row == null) return 'Produto não encontrado';
+
+      final preco = row['preco'];
+      if (preco is num) return _formatPrice(preco);
+
+      // Caso a coluna exista mas venha nula ou tipo inesperado
+      return 'Preço indisponível';
+    } catch (e) {
+      return 'Erro ao consultar: $e';
+    }
   }
 
-  // Sempre que um controller/stream/câmera é criado, é boa prática liberar
-  // os recursos no dispose para evitar vazamento de memória.
+  // Libera a câmera ao sair da tela
   @override
   void dispose() {
     _controller.dispose();
     super.dispose();
   }
 
-  // Callback disparado toda vez que o plugin detecta 1 ou mais códigos.
-  // Recebemos um BarcodeCapture com a lista de códigos no frame atual.
+  /// Callback disparado quando o scanner detecta códigos.
+  /// Mantemos a lógica: pausa, mostra o código, busca no DB e mostra o resultado.
   Future<void> _onDetect(BarcodeCapture capture) async {
-    // Se já estamos pausados (acabamos de ler algo), ignoramos novas leituras.
-    if (_paused) return;
+    if (_paused) return;                   // já pausado? ignora
+    if (capture.barcodes.isEmpty) return;  // nada detectado? sai
 
-    // Segurança: pode acontecer de vir vazio.
-    if (capture.barcodes.isEmpty) return;
-
-    // Pegamos o primeiro código detectado (para protótipo é suficiente).
     final b = capture.barcodes.first;
-
-    // rawValue: valor bruto decodificado. displayValue: representação amigável.
     final code = b.rawValue ?? b.displayValue;
-
-    // Se por algum motivo não conseguimos extrair a string, saímos.
     if (code == null || code.isEmpty) return;
 
-    // Atualizamos a UI:
-    // - marcamos como pausado (não ler mais nada por enquanto)
-    // - guardamos o código lido
-    // - calculamos o texto do preço (mock ou "não encontrado")
+    // Pausa a leitura visualmente, exibe código e um "carregando..."
     setState(() {
       _paused = true;
       _lastCode = code;
-      _priceText = _lookupPrice(code);
+      _priceText = 'Buscando preço...';
     });
 
-    // Paramos a câmera (opcional) para evitar leituras repetidas
-    // enquanto mostramos o resultado.
+    // Opcional: parar a câmera para não ficar detectando de novo.
+    // (Se preferir, comente a linha abaixo e apenas confie na flag _paused)
     await _controller.stop();
+
+    // Busca no Supabase e atualiza o texto do preço
+    final resultText = await _lookupPriceFromDb(code);
+    if (!mounted) return;
+    setState(() {
+      _priceText = resultText;
+    });
   }
 
-  // Retoma a leitura: limpa o resultado mostrado e liga a câmera de novo.
+  /// Retoma a leitura: limpa painel e religa a câmera.
   Future<void> _resumeScanning() async {
     setState(() {
       _paused = false;
       _lastCode = null;
       _priceText = null;
     });
-    await _controller.start(); // Reinicia a câmera/leitor.
+    await _controller.start();
   }
 
   @override
   Widget build(BuildContext context) {
-    // Pegamos o tamanho da tela para dimensionar uma "moldura" central.
     final size = MediaQuery.of(context).size;
-    final frameSize = size.width * 0.75; // quadrado com 75% da largura da tela
+    final frameSize = size.width * 0.75; // moldura 75% da largura
 
     return Scaffold(
       appBar: AppBar(
@@ -111,15 +103,12 @@ class _ScanState extends State<Scan> {
       body: Stack(
         children: [
           // 1) Câmera + detecção
-          // O MobileScanner renderiza a imagem da câmera e faz a detecção.
-          // onDetect é chamado toda vez que códigos forem reconhecidos.
           MobileScanner(
             controller: _controller,
             onDetect: _onDetect,
           ),
 
-          // 2) Moldura visual (overlay) — apenas estética/guia para o usuário.
-          // IgnorePointer garante que toques passem "através" do overlay.
+          // 2) Moldura/overlay
           IgnorePointer(
             child: Center(
               child: Container(
@@ -133,27 +122,20 @@ class _ScanState extends State<Scan> {
             ),
           ),
 
-          // 3) Painel inferior com o resultado (só aparece se já lemos um código).
+          // 3) Painel inferior com resultado após leitura
           if (_lastCode != null) ...[
             Align(
               alignment: Alignment.bottomCenter,
               child: Container(
                 width: double.infinity,
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.65), // fundo semi-transparente
-                ),
+                decoration: BoxDecoration(color: Colors.black.withOpacity(0.65)),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min, // ocupa só o necessário
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Mostra o EAN/código detectado
-                    Text(
-                      'Código: $_lastCode',
-                      style: const TextStyle(color: Colors.white, fontSize: 16),
-                    ),
+                    Text('Código: $_lastCode',
+                        style: const TextStyle(color: Colors.white, fontSize: 16)),
                     const SizedBox(height: 8),
-
-                    // Mostra o preço formatado ou "não encontrado"
                     Text(
                       _priceText ?? '',
                       style: const TextStyle(
@@ -163,8 +145,6 @@ class _ScanState extends State<Scan> {
                       ),
                     ),
                     const SizedBox(height: 12),
-
-                    // Botão para retomar a leitura (liga a câmera novamente)
                     ElevatedButton(
                       onPressed: _resumeScanning,
                       child: const Text('Ler outro'),
