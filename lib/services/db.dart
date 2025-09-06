@@ -14,7 +14,7 @@ class DbService {
     // Ajuste as colunas conforme seu schema.
     final data = await _client
         .from('produto')
-        .select('id, nome, codigo_barras, preco')
+        .select('nome_produto, codigo_barras, preco_venda')
         .eq('codigo_barras', ean.trim())
         .maybeSingle();
 

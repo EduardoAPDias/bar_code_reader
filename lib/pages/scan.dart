@@ -34,7 +34,7 @@ class _ScanState extends State<Scan> {
       final row = await _db.getProdutoByBarcode(ean);
       if (row == null) return 'Produto não encontrado';
 
-      final preco = row['preco'];
+      final preco = row['preco_venda'];
       if (preco is num) return _formatPrice(preco);
 
       // Caso a coluna exista mas venha nula ou tipo inesperado
